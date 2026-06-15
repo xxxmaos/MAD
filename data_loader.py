@@ -1,5 +1,5 @@
 """
-Data loaders for MMLU-Pro and QuALITY.
+Data loaders for MMLU-Pro, QuALITY, and MultiRC.
 Loads from HuggingFace and samples questions with stratification by category.
 """
 
@@ -59,6 +59,58 @@ def load_quality_dataset(split: str = "validation") -> List[Dict[str, Any]]:
             "hard": bool(item.get("hard", False)),
         })
 
+    return normalized
+
+
+def load_multirc_dataset(split: str = "validation") -> List[Dict[str, Any]]:
+    """
+    Load and normalize SuperGLUE MultiRC as a multi-answer MCQ dataset.
+
+    HuggingFace stores MultiRC at the answer-candidate level. This loader
+    groups rows by passage/question and turns all label=1 candidates into a
+    canonical answer set such as "A,C".
+    """
+    print(f"Loading SuperGLUE MultiRC dataset from HuggingFace (split={split})...")
+    dataset = load_dataset("super_glue", "multirc", split=split)
+    print(f"Dataset loaded. Total answer candidates: {len(dataset)}")
+
+    grouped: Dict[Any, Dict[str, Any]] = {}
+    for idx, item in enumerate(dataset):
+        item_idx = item.get("idx", {})
+        key = (
+            item_idx.get("paragraph", item.get("passage", "")),
+            item_idx.get("question", item.get("question", "")),
+        )
+        if key not in grouped:
+            grouped[key] = {
+                "global_idx": len(grouped),
+                "candidate_row_indices": [],
+                "question": (
+                    f"Passage:\n{item['paragraph'] if 'paragraph' in item else item['passage']}\n\n"
+                    f"Question:\n{item['question']}"
+                ),
+                "options": [],
+                "answer_indices": [],
+                "category": "multirc",
+                "source_dataset": "multirc",
+            }
+        group = grouped[key]
+        option_index = len(group["options"])
+        group["candidate_row_indices"].append(idx)
+        group["options"].append(item["answer"])
+        if int(item.get("label", 0)) == 1:
+            group["answer_indices"].append(option_index)
+
+    normalized: List[Dict[str, Any]] = []
+    for group in grouped.values():
+        if not group["answer_indices"]:
+            continue
+        answer = ",".join(chr(65 + index) for index in group["answer_indices"])
+        group["answer"] = answer
+        group["answer_set"] = answer
+        normalized.append(group)
+
+    print(f"Grouped into {len(normalized)} multi-answer questions")
     return normalized
 
 

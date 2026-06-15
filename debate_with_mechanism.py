@@ -42,6 +42,13 @@ OptionLedger = Dict[str, Dict[str, Any]]
 _SUMMARY_EMBEDDING_CACHE: Dict[Tuple[str, str], List[float]] = {}
 
 
+def _answer_to_option_set(answer: Optional[str]) -> List[str]:
+    """Parse a single-letter or comma-separated answer into option letters."""
+    if not answer:
+        return []
+    return sorted(set(re.findall(r"[A-Z]", str(answer).upper())))
+
+
 def compute_verdicts(
     answers_dict: Dict[str, Optional[str]],
     num_options: Optional[int] = None,
@@ -65,9 +72,10 @@ def compute_verdicts(
     support_agents: Dict[str, List[str]] = {option: [] for option in option_labels}
 
     for agent_id, answer in answers_dict.items():
-        if answer and answer in support_counts:
-            support_counts[answer] += 1
-            support_agents[answer].append(agent_id)
+        for option in _answer_to_option_set(answer):
+            if option in support_counts:
+                support_counts[option] += 1
+                support_agents[option].append(agent_id)
 
     all_agents = list(answers_dict.keys())
     ledger: OptionLedger = {}

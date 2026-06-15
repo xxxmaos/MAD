@@ -7,7 +7,7 @@ Handles API calls, token tracking, answer extraction, and retry logic.
 import re
 import time
 import unicodedata
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
@@ -259,6 +259,63 @@ Return exactly one letter from A to J. If the response implies an option without
     return None, repair_usage_total, "\n".join(repair_transcript)
 
 
+def _canonical_answer_set(letters: List[str], choices: str = "") -> Optional[str]:
+    """Return a stable comma-separated answer set like A,C."""
+    max_options = max(1, min(26, len([line for line in choices.splitlines() if line.strip()])))
+    valid = {chr(65 + index) for index in range(max_options)}
+    normalized = sorted({letter.upper() for letter in letters if letter.upper() in valid})
+    if not normalized:
+        return None
+    return ",".join(normalized)
+
+
+def extract_answer_set(response_text: str, choices: str = "") -> Optional[str]:
+    """Extract multiple selected option letters as a canonical comma-separated set."""
+    if not response_text:
+        return None
+
+    text = _normalize_answer_text(response_text)
+    patterns = [
+        r'\bMy\s+answers?\s+are\s*:?\s*([A-Z](?:\s*[,;/&+]\s*[A-Z])*)',
+        r'\bFinal\s+answers?\s*(?:are|is)?\s*:?\s*([A-Z](?:\s*[,;/&+]\s*[A-Z])*)',
+        r'\bAnswers?\s*(?:are|is)?\s*:?\s*([A-Z](?:\s*[,;/&+]\s*[A-Z])*)',
+        r'<answer>\s*([A-Z](?:\s*[,;/&+]\s*[A-Z])*)\s*</answer>',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if match:
+            letters = re.findall(r'[A-Z]', match.group(1).upper())
+            answer_set = _canonical_answer_set(letters, choices)
+            if answer_set:
+                return answer_set
+
+    for line in text.splitlines()[:5]:
+        cleaned = line.strip().strip("*`_ \t\r\n")
+        if re.fullmatch(r'[\[\(\{]?\s*[A-Z](?:\s*[,;/&+]\s*[A-Z])*\s*[\]\)\}]?', cleaned):
+            letters = re.findall(r'[A-Z]', cleaned.upper())
+            answer_set = _canonical_answer_set(letters, choices)
+            if answer_set:
+                return answer_set
+
+    single = extract_answer(response_text)
+    if single:
+        return _canonical_answer_set([single], choices)
+    return None
+
+
+def extract_or_repair_answer_set(
+    response_text: str,
+    choices: str,
+    agent_id: Optional[int] = None,
+) -> Tuple[Optional[str], Usage, str]:
+    """Extract a multi-answer set. LLM repair is intentionally disabled by default."""
+    del agent_id
+    answer = extract_answer_set(response_text, choices)
+    if answer:
+        return answer, _zero_usage(), ""
+    return None, _zero_usage(), ""
+
+
 def _build_debate_prompt(
     question: str,
     choices: str,
@@ -390,6 +447,46 @@ Then give a concise justification in 3-6 sentences."""
                 raise
 
 
+def agent_initial_response_multi_answer(
+    question: str,
+    choices: str,
+    agent_id: int,
+    temperature: float,
+) -> Tuple[str, Usage]:
+    """Get initial response for a multiple-correct-answer question."""
+    client, model_name, agent_name = get_client(agent_id)
+
+    prompt = f"""You are Agent {agent_id} ({agent_name}), participating in a group discussion about a multiple-answer reading-comprehension question.
+
+Question: {question}
+
+Options:
+{choices}
+
+One or more options may be correct. Select every option that is directly supported by the passage/question, and exclude unsupported or contradicted options.
+
+Output format:
+First line: "My answers are: A,C" using comma-separated option letters in alphabetical order.
+Then give a concise evidence-based justification in 3-6 sentences."""
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=1000,
+            )
+            usage = extract_usage(response)
+            return response.choices[0].message.content, usage
+        except Exception as exc:
+            print(f"Agent {agent_id} attempt {attempt + 1} failed: {exc}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                raise
+
+
 def agent_debate_response(
     question: str,
     choices: str,
@@ -413,6 +510,61 @@ def agent_debate_response(
         predecessor_response,
         round_num,
     )
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=1000,
+            )
+            usage = extract_usage(response)
+            return response.choices[0].message.content, usage
+        except Exception as exc:
+            print(
+                f"Agent {agent_id} round {round_num} attempt {attempt + 1} failed: {exc}"
+            )
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                raise
+
+
+def agent_debate_response_multi_answer(
+    question: str,
+    choices: str,
+    agent_id: int,
+    predecessor_id: int,
+    predecessor_response: str,
+    round_num: int,
+    temperature: float,
+) -> Tuple[str, Usage]:
+    """Get debate response for a multiple-correct-answer question."""
+    client, model_name, agent_name = get_client(agent_id)
+    _, _, pred_agent_name = get_client(predecessor_id)
+
+    prompt = f"""You are Agent {agent_id} ({agent_name}) in round {round_num} of a chain debate about a multiple-answer question.
+
+Question: {question}
+
+Options:
+{choices}
+
+The debate context from Agent {predecessor_id} ({pred_agent_name}) is:
+\"\"\"
+{predecessor_response}
+\"\"\"
+
+Use an evidence-grounded, commitment-aware decision process:
+1. Treat each option independently as include or exclude.
+2. Keep your previous included set unless the context shows specific missing evidence, contradiction, or stronger option-level reasoning.
+3. Do not include an option merely because another agent included it.
+4. Briefly cite or paraphrase key passage/question evidence for included options and important exclusions.
+
+Output format:
+First line: "My answers are: A,C" using comma-separated option letters in alphabetical order.
+Then give a concise evidence-based justification in 3-6 sentences."""
 
     for attempt in range(MAX_RETRIES):
         try:

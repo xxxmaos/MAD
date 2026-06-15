@@ -20,6 +20,7 @@ from config import (
 )
 from data_loader import (
     load_mmlu_pro_dataset,
+    load_multirc_dataset,
     load_quality_dataset,
     inspect_first_sample,
     sample_questions,
@@ -39,6 +40,7 @@ MECHANISM_MODES = [
     "adaptive_resolver",
     "adaptive_resolver_v2_all_stable_gate",
     "V3ResolverInfluenceGate",
+    "V3MultiAnswerResolverInfluenceGate",
     "V4QuestionAwareEvidenceSnippets",
     "V42EmbeddingTopKSnippets",
     "V43SelectiveEmbeddingSnippets",
@@ -88,6 +90,8 @@ def prepare_dataset(dataset_name: str = "mmlu_pro", num_samples: Optional[int] =
         dataset = load_mmlu_pro_dataset()
     elif dataset_name == "quality":
         dataset = load_quality_dataset(split="validation")
+    elif dataset_name == "multirc":
+        dataset = load_multirc_dataset(split="validation")
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -132,11 +136,12 @@ def run_experiment_mode(
         "adaptive_resolver": 7,
         "adaptive_resolver_v2_all_stable_gate": 8,
         "V3ResolverInfluenceGate": 9,
-        "V4QuestionAwareEvidenceSnippets": 10,
-        "V42EmbeddingTopKSnippets": 11,
-        "V43SelectiveEmbeddingSnippets": 12,
-        "V5SelectiveReplacement": 13,
-        "compression_only_no_early_exit": 14,
+        "V3MultiAnswerResolverInfluenceGate": 10,
+        "V4QuestionAwareEvidenceSnippets": 11,
+        "V42EmbeddingTopKSnippets": 12,
+        "V43SelectiveEmbeddingSnippets": 13,
+        "V5SelectiveReplacement": 14,
+        "compression_only_no_early_exit": 15,
     }
     mode_num = mode_labels[mode]
     
@@ -177,6 +182,7 @@ def run_experiment_mode(
                 "adaptive_resolver",
                 "adaptive_resolver_v2_all_stable_gate",
                 "V3ResolverInfluenceGate",
+                "V3MultiAnswerResolverInfluenceGate",
                 "V4QuestionAwareEvidenceSnippets",
                 "V42EmbeddingTopKSnippets",
                 "V43SelectiveEmbeddingSnippets",
@@ -191,6 +197,7 @@ def run_experiment_mode(
                         mode in (
                             "adaptive_resolver_v2_all_stable_gate",
                             "V3ResolverInfluenceGate",
+                            "V3MultiAnswerResolverInfluenceGate",
                             "V4QuestionAwareEvidenceSnippets",
                             "V42EmbeddingTopKSnippets",
                             "V43SelectiveEmbeddingSnippets",
@@ -200,6 +207,7 @@ def run_experiment_mode(
                     enable_resolver_influence_gate=(
                         mode in (
                             "V3ResolverInfluenceGate",
+                            "V3MultiAnswerResolverInfluenceGate",
                             "V4QuestionAwareEvidenceSnippets",
                             "V42EmbeddingTopKSnippets",
                             "V43SelectiveEmbeddingSnippets",
@@ -232,6 +240,7 @@ def run_experiment_mode(
                         mode == "V5SelectiveReplacement"
                     ),
                     force_llm_summaries=(mode == "V5SelectiveReplacement"),
+                    multi_answer=(mode == "V3MultiAnswerResolverInfluenceGate"),
                 )
             else:  # mechanism variants
                 mechanism_kwargs = {}
@@ -326,6 +335,7 @@ def run_experiment_mode(
                 "adaptive_resolver",
                 "adaptive_resolver_v2_all_stable_gate",
                 "V3ResolverInfluenceGate",
+                "V3MultiAnswerResolverInfluenceGate",
                 "V4QuestionAwareEvidenceSnippets",
                 "V42EmbeddingTopKSnippets",
                 "V43SelectiveEmbeddingSnippets",
@@ -337,6 +347,7 @@ def run_experiment_mode(
                 "adaptive_resolver",
                 "adaptive_resolver_v2_all_stable_gate",
                 "V3ResolverInfluenceGate",
+                "V3MultiAnswerResolverInfluenceGate",
                 "V4QuestionAwareEvidenceSnippets",
                 "V42EmbeddingTopKSnippets",
                 "V43SelectiveEmbeddingSnippets",
@@ -364,8 +375,15 @@ def run_experiment_mode(
                             "V4 Question-Aware Evidence Snippets"
                             if mode == "V4QuestionAwareEvidenceSnippets"
                             else (
-                                "V3 Resolver Influence Gate"
-                                if mode == "V3ResolverInfluenceGate"
+                                (
+                                    "V3 Multi-Answer Resolver Influence Gate"
+                                    if mode == "V3MultiAnswerResolverInfluenceGate"
+                                    else "V3 Resolver Influence Gate"
+                                )
+                                if mode in (
+                                    "V3ResolverInfluenceGate",
+                                    "V3MultiAnswerResolverInfluenceGate",
+                                )
                                 else (
                                     "V2 + all_stable safety gate"
                                     if mode == "adaptive_resolver_v2_all_stable_gate"
@@ -399,6 +417,11 @@ def run_experiment_mode(
                 else None
             ),
             "selective_passage_replacement": mode == "V5SelectiveReplacement",
+            "answer_mode": (
+                "multi_answer_set"
+                if mode == "V3MultiAnswerResolverInfluenceGate"
+                else "single_answer"
+            ),
             "evidence_snippet_strategy": (
                 "multi_query_option_contrast_mmr_verification"
                 if mode == "V5SelectiveReplacement"
@@ -477,9 +500,9 @@ def main():
     )
     parser.add_argument(
         "--dataset",
-        choices=["mmlu_pro", "quality"],
+        choices=["mmlu_pro", "quality", "multirc"],
         default="mmlu_pro",
-        help="Dataset to run: mmlu_pro or quality"
+        help="Dataset to run: mmlu_pro, quality, or multirc"
     )
     parser.add_argument(
         "--num-samples",

@@ -27,8 +27,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import config as _config
 import requests
 from agent import (
+    agent_debate_response_multi_answer,
     agent_debate_response,
+    agent_initial_response_multi_answer,
     agent_initial_response,
+    extract_or_repair_answer_set,
     extract_or_repair_answer,
     get_client,
 )
@@ -97,6 +100,7 @@ def run_debate_with_adaptive_resolver(
     evidence_snippet_policy: str = "always",
     enable_selective_passage_replacement: bool = False,
     force_llm_summaries: bool = False,
+    multi_answer: bool = False,
 ) -> Dict[str, Any]:
     """
     Run debate with adaptive disputed-state handling.
@@ -122,7 +126,11 @@ def run_debate_with_adaptive_resolver(
     elif enable_question_aware_evidence_snippets:
         variant_name = ADAPTIVE_RESOLVER_V4_VARIANT
     elif enable_resolver_influence_gate:
-        variant_name = ADAPTIVE_RESOLVER_V3_VARIANT
+        variant_name = (
+            "V3 Multi-Answer Resolver Influence Gate"
+            if multi_answer
+            else ADAPTIVE_RESOLVER_V3_VARIANT
+        )
     elif enable_all_stable_safety_gate:
         variant_name = ADAPTIVE_RESOLVER_VARIANT
     else:
@@ -142,21 +150,36 @@ def run_debate_with_adaptive_resolver(
 
     for agent_id in agent_ids:
         try:
-            text, usage = agent_initial_response(
-                question,
-                choices,
-                agent_id,
-                TEMPERATURE,
-            )
+            if multi_answer:
+                text, usage = agent_initial_response_multi_answer(
+                    question,
+                    choices,
+                    agent_id,
+                    TEMPERATURE,
+                )
+            else:
+                text, usage = agent_initial_response(
+                    question,
+                    choices,
+                    agent_id,
+                    TEMPERATURE,
+                )
         except Exception as exc:
             text = f"[ERROR] {exc}"
             usage = _zero_usage()
         history[0][agent_id] = text
-        answer, repair_usage, repair_text = extract_or_repair_answer(
-            text,
-            choices,
-            agent_id,
-        )
+        if multi_answer:
+            answer, repair_usage, repair_text = extract_or_repair_answer_set(
+                text,
+                choices,
+                agent_id,
+            )
+        else:
+            answer, repair_usage, repair_text = extract_or_repair_answer(
+                text,
+                choices,
+                agent_id,
+            )
         if repair_usage.get("total_tokens", 0) > 0:
             _add_usage(usage, repair_usage)
             answer_repair_log.setdefault("0", []).append(
@@ -254,24 +277,42 @@ def run_debate_with_adaptive_resolver(
 
             try:
                 agent_question = active_replacement_question or question
-                text, usage = agent_debate_response(
-                    agent_question,
-                    choices,
-                    agent_id,
-                    predecessor_id,
-                    enhanced_context,
-                    round_num,
-                    DEBATE_TEMP,
-                )
+                if multi_answer:
+                    text, usage = agent_debate_response_multi_answer(
+                        agent_question,
+                        choices,
+                        agent_id,
+                        predecessor_id,
+                        enhanced_context,
+                        round_num,
+                        DEBATE_TEMP,
+                    )
+                else:
+                    text, usage = agent_debate_response(
+                        agent_question,
+                        choices,
+                        agent_id,
+                        predecessor_id,
+                        enhanced_context,
+                        round_num,
+                        DEBATE_TEMP,
+                    )
             except Exception as exc:
                 text = f"[ERROR] {exc}"
                 usage = _zero_usage()
             history[round_num][agent_id] = text
-            answer, repair_usage, repair_text = extract_or_repair_answer(
-                text,
-                choices,
-                agent_id,
-            )
+            if multi_answer:
+                answer, repair_usage, repair_text = extract_or_repair_answer_set(
+                    text,
+                    choices,
+                    agent_id,
+                )
+            else:
+                answer, repair_usage, repair_text = extract_or_repair_answer(
+                    text,
+                    choices,
+                    agent_id,
+                )
             if repair_usage.get("total_tokens", 0) > 0:
                 _add_usage(usage, repair_usage)
                 answer_repair_log.setdefault(str(round_num), []).append(
@@ -332,7 +373,12 @@ def run_debate_with_adaptive_resolver(
             if not enable_all_stable_safety_gate:
                 round_log["exit_check"] = "all_stable"
                 mechanism_log.append(round_log)
-                final_answer = _get_final_answer(answers, round_num, current_ledger)
+                final_answer = _get_final_answer_multi(
+                    answers,
+                    round_num,
+                    current_ledger,
+                    multi_answer,
+                )
                 if verbose:
                     print(f"    -> Early exit: all_stable, answer={final_answer}")
                 return _build_adaptive_result(
@@ -355,7 +401,12 @@ def run_debate_with_adaptive_resolver(
             #   through a lightweight groupthink challenge instead of ordinary
             #   final review.
             mechanism_log.append(round_log)
-            final_answer = _get_final_answer(answers, round_num, current_ledger)
+            final_answer = _get_final_answer_multi(
+                answers,
+                round_num,
+                current_ledger,
+                multi_answer,
+            )
             safety = _all_stable_safety_check(
                 answers,
                 round_num,
@@ -414,21 +465,39 @@ def run_debate_with_adaptive_resolver(
                 evidence_payload["gate"] = gate
                 round_log["question_aware_evidence_snippets"] = evidence_payload
 
-            challenge, challenge_text, challenge_usage = _run_all_stable_challenge(
-                question,
-                choices,
-                final_answer,
-                answers,
-                history,
-                round_num,
-                safety,
-                evidence_context=challenge_evidence_context,
-            )
+            if multi_answer:
+                challenge, challenge_text, challenge_usage = _run_all_stable_challenge_multi_answer(
+                    question,
+                    choices,
+                    final_answer,
+                    answers,
+                    history,
+                    round_num,
+                    safety,
+                    evidence_context=challenge_evidence_context,
+                )
+            else:
+                challenge, challenge_text, challenge_usage = _run_all_stable_challenge(
+                    question,
+                    choices,
+                    final_answer,
+                    answers,
+                    history,
+                    round_num,
+                    safety,
+                    evidence_context=challenge_evidence_context,
+                )
             _add_usage(dispute_resolver_total_usage, challenge_usage)
-            challenged_answer = _choose_all_stable_challenge_answer(
-                final_answer,
-                challenge,
-            )
+            if multi_answer:
+                challenged_answer = _choose_all_stable_challenge_answer_multi(
+                    final_answer,
+                    challenge,
+                )
+            else:
+                challenged_answer = _choose_all_stable_challenge_answer(
+                    final_answer,
+                    challenge,
+                )
             round_log["all_stable_challenge"] = {
                 "triggered": True,
                 "analysis": challenge,
@@ -462,22 +531,39 @@ def run_debate_with_adaptive_resolver(
             )
 
         if active_resolver_analysis:
-            confirmed, confirmation = _resolver_confirmed(
-                active_resolver_analysis,
-                adaptive_stats,
-                resolver_medium_confirmed_once,
-            )
+            if multi_answer:
+                confirmed, confirmation = _resolver_confirmed_multi_answer(
+                    active_resolver_analysis,
+                    adaptive_stats,
+                    resolver_medium_confirmed_once,
+                )
+            else:
+                confirmed, confirmation = _resolver_confirmed(
+                    active_resolver_analysis,
+                    adaptive_stats,
+                    resolver_medium_confirmed_once,
+                )
             round_log["resolver_confirmation"] = confirmation
             if confirmed:
                 if enable_resolver_influence_gate:
-                    influence_gate = _resolver_influence_gate(
-                        active_resolver_analysis,
-                        confirmation,
-                        active_resolver_trigger_snapshot,
-                        answers,
-                        round_num,
-                        agent_ids,
-                    )
+                    if multi_answer:
+                        influence_gate = _resolver_influence_gate_multi_answer(
+                            active_resolver_analysis,
+                            confirmation,
+                            active_resolver_trigger_snapshot,
+                            answers,
+                            round_num,
+                            agent_ids,
+                        )
+                    else:
+                        influence_gate = _resolver_influence_gate(
+                            active_resolver_analysis,
+                            confirmation,
+                            active_resolver_trigger_snapshot,
+                            answers,
+                            round_num,
+                            agent_ids,
+                        )
                     round_log["resolver_influence_gate"] = influence_gate
                     if not influence_gate["safe"]:
                         next_resolver_context = _format_resolver_influence_block_for_prompt(
@@ -559,20 +645,37 @@ def run_debate_with_adaptive_resolver(
             and round_num < MAX_DEBATE_ROUNDS
             and resolver_trigger_count < 1
         ):
-            resolver, resolver_text, resolver_usage = _run_dispute_resolver(
-                question,
-                choices,
-                current_ledger,
-                answers,
-                history,
-                round_num,
-                adaptive_stats,
-            )
+            if multi_answer:
+                resolver, resolver_text, resolver_usage = _run_dispute_resolver_multi_answer(
+                    question,
+                    choices,
+                    current_ledger,
+                    answers,
+                    history,
+                    round_num,
+                    adaptive_stats,
+                )
+            else:
+                resolver, resolver_text, resolver_usage = _run_dispute_resolver(
+                    question,
+                    choices,
+                    current_ledger,
+                    answers,
+                    history,
+                    round_num,
+                    adaptive_stats,
+                )
             _add_usage(dispute_resolver_total_usage, resolver_usage)
-            calibrated = _compute_calibrated_confidence(
-                resolver,
-                adaptive_stats,
-            )
+            if multi_answer:
+                calibrated = _compute_calibrated_confidence_multi_answer(
+                    resolver,
+                    adaptive_stats,
+                )
+            else:
+                calibrated = _compute_calibrated_confidence(
+                    resolver,
+                    adaptive_stats,
+                )
             resolver_trigger_count += 1
             if calibrated["level"] == "low":
                 next_resolver_context = _format_resolver_for_prompt(
@@ -589,12 +692,20 @@ def run_debate_with_adaptive_resolver(
                     mode="full",
                 )
                 next_resolver_analysis = resolver
-                next_resolver_trigger_snapshot = _resolver_trigger_snapshot(
-                    resolver,
-                    adaptive_stats,
-                    answers,
-                    round_num,
-                )
+                if multi_answer:
+                    next_resolver_trigger_snapshot = _resolver_trigger_snapshot_multi_answer(
+                        resolver,
+                        adaptive_stats,
+                        answers,
+                        round_num,
+                    )
+                else:
+                    next_resolver_trigger_snapshot = _resolver_trigger_snapshot(
+                        resolver,
+                        adaptive_stats,
+                        answers,
+                        round_num,
+                    )
             round_log["dispute_resolver"] = {
                 "triggered": True,
                 "trigger_policy": "first_r2_disputed",
@@ -702,15 +813,30 @@ def run_debate_with_adaptive_resolver(
                 f"exit={round_log['exit_check']}"
             )
 
-    fallback_answer = _get_final_answer(answers, MAX_DEBATE_ROUNDS, current_ledger)
-    review_answer, review_text, review_usage = _run_final_evidence_review(
-        question,
-        choices,
-        current_ledger,
+    fallback_answer = _get_final_answer_multi(
         answers,
-        history,
         MAX_DEBATE_ROUNDS,
+        current_ledger,
+        multi_answer,
     )
+    if multi_answer:
+        review_answer, review_text, review_usage = _run_final_evidence_review_multi_answer(
+            question,
+            choices,
+            current_ledger,
+            answers,
+            history,
+            MAX_DEBATE_ROUNDS,
+        )
+    else:
+        review_answer, review_text, review_usage = _run_final_evidence_review(
+            question,
+            choices,
+            current_ledger,
+            answers,
+            history,
+            MAX_DEBATE_ROUNDS,
+        )
     final_answer = review_answer or fallback_answer
     if mechanism_log:
         mechanism_log[-1]["final_review"] = {
@@ -748,18 +874,27 @@ def _compute_adaptive_stability(
     option_labels: List[str],
 ) -> Dict[str, Any]:
     """Compute categorical stability metrics for the latest answer round."""
-    current_dist = _answer_distribution(answers.get(current_round, {}), option_labels)
+    current_answer_labels = [
+        answer for answer in answers.get(current_round, {}).values() if answer
+    ]
+    previous_answer_labels = [
+        answer for answer in answers.get(current_round - 1, {}).values() if answer
+    ]
+    distribution_labels = sorted(
+        set(option_labels) | set(current_answer_labels) | set(previous_answer_labels)
+    )
+    current_dist = _answer_distribution(answers.get(current_round, {}), distribution_labels)
     previous_dist = _answer_distribution(
         answers.get(current_round - 1, {}),
-        option_labels,
+        distribution_labels,
     )
     current_counts = Counter(
         answer for answer in answers.get(current_round, {}).values()
-        if answer in option_labels
+        if answer
     )
     previous_counts = Counter(
         answer for answer in answers.get(current_round - 1, {}).values()
-        if answer in option_labels
+        if answer
     )
 
     top_answer, top_count, runner_up_count = _top_answer_counts(current_counts)
@@ -771,7 +906,7 @@ def _compute_adaptive_stability(
     normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0.0
     tv_distance = 0.5 * sum(
         abs(current_dist.get(option, 0.0) - previous_dist.get(option, 0.0))
-        for option in option_labels
+        for option in distribution_labels
     )
     top_unchanged = top_answer is not None and top_answer == previous_top
     stable = (
@@ -943,6 +1078,110 @@ Output strict JSON only:
     return _fallback_resolver(disputed), "", _zero_usage()
 
 
+def _run_dispute_resolver_multi_answer(
+    question: str,
+    choices: str,
+    option_ledger: OptionLedger,
+    answers: Dict[int, Dict[int, Optional[str]]],
+    history: Dict[int, Dict[int, str]],
+    current_round: int,
+    adaptive_stats: Dict[str, Any],
+) -> Tuple[Dict[str, Any], str, Usage]:
+    """Ask the resolver to recommend an answer set for MultiRC-style tasks."""
+    client, model, name = get_client(SUMMARIZER_AGENT_ID)
+    del name
+    disputed = [
+        option for option, info in option_ledger.items()
+        if info.get("verdict") == "disputed"
+    ]
+    standings = _format_option_standings(option_ledger)
+    recent_votes = _format_recent_votes(answers, current_round)
+    recent_responses = _format_recent_responses(
+        history,
+        current_round,
+        max_chars_per_response=900,
+    )
+    stats_text = json.dumps(adaptive_stats, ensure_ascii=False, indent=2)
+
+    prompt = f"""You are an independent dispute resolver for a multiple-answer reading-comprehension debate.
+
+Your job is not to follow the majority. Treat each option independently as include or exclude.
+
+Question:
+{question}
+
+Options:
+{choices}
+
+Disputed options: {', '.join(disputed) if disputed else 'none'}
+
+Option standings:
+{standings}
+
+Recent vote history:
+{recent_votes}
+
+Adaptive stability metrics:
+{stats_text}
+
+Recent agent reasoning:
+{recent_responses}
+
+Analyze evidence grounding, reason quality, option contrast, and error diagnosis.
+
+Output strict JSON only:
+{{
+  "recommended_answer": "A,C",
+  "recommended_answers": ["A", "C"],
+  "confidence": "low/medium/high",
+  "evidence_grounding": {{
+    "<option>": {{
+      "support": "specific evidence or argument supporting inclusion",
+      "weakness": "specific weakness or missing evidence",
+      "strength": "weak/medium/strong"
+    }}
+  }},
+  "reason_quality": {{
+    "<option>": {{"score": 1, "issue": "..."}}
+  }},
+  "option_contrast": "one concise paragraph",
+  "error_diagnosis": {{
+    "root_cause": "one sentence",
+    "likely_error_type": "evidence_miss/question_misread/concept_error/reasoning_error/ambiguous"
+  }},
+  "next_round_instruction": "one sentence telling agents what to re-check"
+}}"""
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=SUMMARIZER_TEMPERATURE,
+                max_tokens=SUMMARIZER_MAX_TOKENS,
+            )
+            usage = _zero_usage()
+            if response.usage:
+                usage["prompt_tokens"] = response.usage.prompt_tokens or 0
+                usage["completion_tokens"] = response.usage.completion_tokens or 0
+                usage["total_tokens"] = response.usage.total_tokens or 0
+            text = response.choices[0].message.content or ""
+            parsed = parse_summary_json(text)
+            if not parsed:
+                parsed = _fallback_resolver(disputed)
+            parsed["recommended_answer"] = _normalize_answer_set_value(
+                parsed.get("recommended_answer") or parsed.get("recommended_answers")
+            )
+            return parsed, text, usage
+        except Exception as exc:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                print(f"Multi-answer dispute resolver failed: {exc}")
+
+    return _fallback_resolver(disputed), "", _zero_usage()
+
+
 def _fallback_resolver(disputed_options: List[str]) -> Dict[str, Any]:
     """Return a minimal resolver analysis when JSON parsing/calling fails."""
     return {
@@ -1068,6 +1307,107 @@ def _fallback_all_stable_challenge(
         "evidence_check": "(challenge unavailable)",
         "reason": f"Keep current consensus answer {current_answer}.",
     }
+
+
+def _run_all_stable_challenge_multi_answer(
+    question: str,
+    choices: str,
+    current_answer: Optional[str],
+    answers: Dict[int, Dict[int, Optional[str]]],
+    history: Dict[int, Dict[int, str]],
+    current_round: int,
+    safety: Dict[str, Any],
+    evidence_context: Optional[str] = None,
+) -> Tuple[Dict[str, Any], str, Usage]:
+    """Lightweight challenge for an unsafe all-stable answer set."""
+    client, model, _name = get_client(SUMMARIZER_AGENT_ID)
+    recent_votes = _format_recent_votes(answers, current_round)
+    recent_responses = _format_recent_responses(
+        history,
+        current_round,
+        max_chars_per_response=700,
+    )
+    evidence_block = (
+        f"\nRetrieved evidence snippets:\n{evidence_context}\n"
+        if evidence_context
+        else ""
+    )
+    prompt = f"""You are a lightweight safety challenger for a multiple-answer debate.
+
+All agents currently agree on answer set: {current_answer}
+
+Question:
+{question}
+
+Options:
+{choices}
+
+Recent vote history:
+{recent_votes}
+
+Safety diagnostics:
+{json.dumps(safety, ensure_ascii=False, indent=2)}
+{evidence_block}
+Recent agent reasoning:
+{recent_responses}
+
+Task:
+Check whether the consensus answer set is directly supported. If an option should be added or removed, propose the corrected answer set.
+
+Output strict JSON only:
+{{
+  "safe": true,
+  "alternative_answer": "A,C",
+  "confidence": "low/medium/high",
+  "reason": "one concise sentence",
+  "evidence_check": "one sentence"
+}}"""
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=SUMMARIZER_TEMPERATURE,
+                max_tokens=SUMMARIZER_MAX_TOKENS,
+            )
+            usage = _zero_usage()
+            if response.usage:
+                usage["prompt_tokens"] = response.usage.prompt_tokens or 0
+                usage["completion_tokens"] = response.usage.completion_tokens or 0
+                usage["total_tokens"] = response.usage.total_tokens or 0
+            text = response.choices[0].message.content or ""
+            parsed = parse_summary_json(text)
+            if not parsed:
+                parsed = _fallback_all_stable_challenge(current_answer)
+            parsed["alternative_answer"] = _normalize_answer_set_value(
+                parsed.get("alternative_answer")
+            )
+            return parsed, text, usage
+        except Exception as exc:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                print(f"Multi-answer all-stable challenge failed: {exc}")
+
+    return _fallback_all_stable_challenge(current_answer), "", _zero_usage()
+
+
+def _choose_all_stable_challenge_answer_multi(
+    current_answer: Optional[str],
+    challenge: Dict[str, Any],
+) -> Optional[str]:
+    """Choose answer set from a multi-answer all-stable challenge."""
+    alternative = _normalize_answer_set_value(challenge.get("alternative_answer"))
+    confidence = str(challenge.get("confidence", "")).strip().lower()
+    if (
+        alternative
+        and alternative != current_answer
+        and confidence == "high"
+        and challenge.get("safe") is False
+    ):
+        return alternative
+    return current_answer
 
 
 def _choose_all_stable_challenge_answer(
@@ -2442,6 +2782,91 @@ Then give a concise evidence-based justification in 3-6 sentences."""
     return None, "", _zero_usage()
 
 
+def _run_final_evidence_review_multi_answer(
+    question: str,
+    choices: str,
+    option_ledger: OptionLedger,
+    answers: Dict[int, Dict[int, Optional[str]]],
+    history: Dict[int, Dict[int, str]],
+    current_round: int,
+) -> Tuple[Optional[str], str, Usage]:
+    """Use the strongest configured agent as final judge for answer sets."""
+    reviewer_id, reviewer_name = _select_strongest_final_review_agent()
+    client, model, name = get_client(reviewer_id)
+    disputed = [
+        option for option, info in option_ledger.items()
+        if info.get("verdict") == "disputed"
+    ]
+    standings = _format_option_standings(option_ledger)
+    recent_votes = _format_recent_votes(answers, current_round)
+    recent_responses = _format_recent_responses(history, current_round)
+
+    prompt = f"""You are Agent {reviewer_id} ({name}), acting as the strongest final evidence judge.
+
+The debate reached the maximum number of rounds on a multiple-answer question.
+
+Question:
+{question}
+
+Options:
+{choices}
+
+Option standings:
+{standings}
+
+Disputed options: {', '.join(disputed) if disputed else 'none'}
+
+Recent vote history:
+{recent_votes}
+
+Recent agent reasoning:
+{recent_responses}
+
+Task:
+1. Treat each option independently as include or exclude.
+2. Include every option directly supported by the passage/question.
+3. Exclude unsupported, contradicted, or merely plausible options.
+4. Do not choose by vote count alone.
+
+Output format:
+First line: "My answers are: A,C" using comma-separated option letters in alphabetical order.
+Then give a concise evidence-based justification in 3-6 sentences."""
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=SUMMARIZER_TEMPERATURE,
+                max_tokens=SUMMARIZER_MAX_TOKENS,
+            )
+            usage = _zero_usage()
+            if response.usage:
+                usage["prompt_tokens"] = response.usage.prompt_tokens or 0
+                usage["completion_tokens"] = response.usage.completion_tokens or 0
+                usage["total_tokens"] = response.usage.total_tokens or 0
+            text = response.choices[0].message.content or ""
+            answer, repair_usage, repair_text = extract_or_repair_answer_set(
+                text,
+                choices,
+                reviewer_id,
+            )
+            if repair_usage.get("total_tokens", 0) > 0:
+                _add_usage(usage, repair_usage)
+                text = f"{text}\n\n[Answer repair]\n{repair_text}"
+            review_header = (
+                f"[Final review agent: {reviewer_id} {reviewer_name}]\n"
+            )
+            return answer, review_header + text, usage
+        except Exception as exc:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                print(f"Strong multi-answer final evidence review failed: {exc}")
+
+    return None, "", _zero_usage()
+
+
 def _select_strongest_final_review_agent() -> Tuple[int, str]:
     """Select the strongest available configured agent for final review."""
     priority = [
@@ -2547,6 +2972,68 @@ def _normalize_option(value: Any) -> Optional[str]:
     if "A" <= letter <= "J":
         return letter
     return None
+
+
+def _normalize_answer_set_value(value: Any) -> Optional[str]:
+    """Normalize resolver output into a canonical A,C answer set."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        letters = [
+            _normalize_option(item)
+            for item in value
+        ]
+    else:
+        letters = re.findall(r"[A-J]", str(value).upper())
+    return _canonical_answer_string([letter for letter in letters if letter])
+
+
+def _compute_calibrated_confidence_multi_answer(
+    resolver: Dict[str, Any],
+    adaptive_stats: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Calibrate resolver confidence for a recommended answer set."""
+    resolver_answer = _normalize_answer_set_value(
+        resolver.get("recommended_answer") or resolver.get("recommended_answers")
+    )
+    raw_confidence = str(resolver.get("confidence", "")).strip().lower()
+    llm_score = {"high": 0.85, "medium": 0.60, "low": 0.35}.get(raw_confidence, 0.45)
+    current_majority = adaptive_stats.get("top_answer")
+    majority_match = 1.0 if resolver_answer and current_majority == resolver_answer else 0.0
+    margin = int(adaptive_stats.get("margin", 0) or 0)
+    normalized_entropy = _metric_float(adaptive_stats, "normalized_entropy", 1.0)
+    margin_score = _clamp01(margin / 3.0)
+    entropy_score = _clamp01(1.0 - normalized_entropy)
+    vote_confirmation_score = _clamp01(
+        0.45 * majority_match
+        + 0.30 * margin_score
+        + 0.25 * entropy_score
+    )
+    calibrated_score = _clamp01(0.50 * vote_confirmation_score + 0.50 * llm_score)
+    if calibrated_score >= CALIBRATED_HIGH_THRESHOLD:
+        level = "high"
+    elif calibrated_score >= CALIBRATED_MEDIUM_THRESHOLD:
+        level = "medium"
+    else:
+        level = "low"
+    return {
+        "resolver_answer": resolver_answer,
+        "score": calibrated_score,
+        "level": level,
+        "resolver_quality_score": llm_score,
+        "vote_confirmation_score": vote_confirmation_score,
+        "components": {
+            "majority_match": majority_match,
+            "margin_score": margin_score,
+            "entropy_score": entropy_score,
+            "llm_confidence_score": llm_score,
+        },
+        "raw_llm_confidence": raw_confidence or "unknown",
+        "thresholds": {
+            "high": CALIBRATED_HIGH_THRESHOLD,
+            "medium": CALIBRATED_MEDIUM_THRESHOLD,
+        },
+    }
 
 
 def _evidence_grounding_score(
@@ -2810,6 +3297,53 @@ def _resolver_confirmed(
     return confirmed, confirmation
 
 
+def _resolver_confirmed_multi_answer(
+    resolver: Dict[str, Any],
+    adaptive_stats: Dict[str, Any],
+    medium_confirmed_once: bool = False,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Check whether the next round confirms a resolver answer set."""
+    calibrated = _compute_calibrated_confidence_multi_answer(resolver, adaptive_stats)
+    resolver_answer = calibrated["resolver_answer"]
+    calibrated_level = calibrated["level"]
+    top_answer = adaptive_stats.get("top_answer")
+    margin = int(adaptive_stats.get("margin", 0) or 0)
+    normalized_entropy = _metric_float(adaptive_stats, "normalized_entropy", 1.0)
+    majority_matches = top_answer == resolver_answer
+    confirmed = (
+        resolver_answer is not None
+        and majority_matches
+        and margin >= ADAPTIVE_MIN_MARGIN
+        and normalized_entropy <= ADAPTIVE_MAX_NORMALIZED_ENTROPY
+        and (
+            calibrated_level == "high"
+            or (calibrated_level == "medium" and medium_confirmed_once)
+        )
+    )
+    confirmation = {
+        "resolver_answer": resolver_answer,
+        "resolver_confidence": str(resolver.get("confidence", "")).strip().lower()
+        or "unknown",
+        "calibrated_score": calibrated["score"],
+        "calibrated_level": calibrated_level,
+        "calibrated_confidence": calibrated,
+        "current_majority": top_answer,
+        "margin": margin,
+        "normalized_entropy": normalized_entropy,
+        "majority_matches_resolver": majority_matches,
+        "medium_confirmed_once": medium_confirmed_once,
+        "confirmed": confirmed,
+        "answer_mode": "multi_answer_set",
+        "criteria": {
+            "high_can_exit_immediately": True,
+            "medium_requires_two_confirmations": True,
+            "min_margin": ADAPTIVE_MIN_MARGIN,
+            "max_normalized_entropy": ADAPTIVE_MAX_NORMALIZED_ENTROPY,
+        },
+    }
+    return confirmed, confirmation
+
+
 def _resolver_trigger_snapshot(
     resolver: Dict[str, Any],
     adaptive_stats: Dict[str, Any],
@@ -2818,6 +3352,34 @@ def _resolver_trigger_snapshot(
 ) -> Dict[str, Any]:
     """Capture pre-injection vote state for resolver influence detection."""
     resolver_answer = _normalize_option(resolver.get("recommended_answer"))
+    trigger_answers = answers.get(trigger_round, {})
+    trigger_counts = Counter(answer for answer in trigger_answers.values() if answer)
+    r0_snapshot = _majority_snapshot(answers.get(0, {}))
+    return {
+        "trigger_round": trigger_round,
+        "resolver_answer": resolver_answer,
+        "trigger_top_answer": adaptive_stats.get("top_answer"),
+        "trigger_margin": int(adaptive_stats.get("margin", 0) or 0),
+        "trigger_support_count": trigger_counts.get(resolver_answer, 0)
+        if resolver_answer
+        else 0,
+        "trigger_counts": dict(trigger_counts),
+        "resolver_was_top": resolver_answer == adaptive_stats.get("top_answer"),
+        "r0_majority_answer": r0_snapshot.get("majority_answer"),
+        "r0_majority": r0_snapshot,
+    }
+
+
+def _resolver_trigger_snapshot_multi_answer(
+    resolver: Dict[str, Any],
+    adaptive_stats: Dict[str, Any],
+    answers: Dict[int, Dict[int, Optional[str]]],
+    trigger_round: int,
+) -> Dict[str, Any]:
+    """Capture pre-injection answer-set state for resolver influence detection."""
+    resolver_answer = _normalize_answer_set_value(
+        resolver.get("recommended_answer") or resolver.get("recommended_answers")
+    )
     trigger_answers = answers.get(trigger_round, {})
     trigger_counts = Counter(answer for answer in trigger_answers.values() if answer)
     r0_snapshot = _majority_snapshot(answers.get(0, {}))
@@ -2926,6 +3488,70 @@ def _resolver_influence_gate(
     }
 
 
+def _resolver_influence_gate_multi_answer(
+    resolver: Dict[str, Any],
+    confirmation: Dict[str, Any],
+    trigger_snapshot: Optional[Dict[str, Any]],
+    answers: Dict[int, Dict[int, Optional[str]]],
+    current_round: int,
+    agent_ids: List[int],
+) -> Dict[str, Any]:
+    """Resolver influence gate for answer-set recommendations."""
+    resolver_answer = _normalize_answer_set_value(confirmation.get("resolver_answer"))
+    if not trigger_snapshot:
+        trigger_snapshot = _resolver_trigger_snapshot_multi_answer(
+            resolver,
+            {"top_answer": None, "margin": 0},
+            answers,
+            max(0, current_round - 1),
+        )
+    current_counts = Counter(
+        answer for answer in answers.get(current_round, {}).values() if answer
+    )
+    current_support_count = current_counts.get(resolver_answer, 0) if resolver_answer else 0
+    trigger_support_count = int(trigger_snapshot.get("trigger_support_count", 0) or 0)
+    support_jump = current_support_count - trigger_support_count
+    trigger_margin = int(trigger_snapshot.get("trigger_margin", 0) or 0)
+    r0_majority_answer = trigger_snapshot.get("r0_majority_answer")
+    resolver_was_top = bool(trigger_snapshot.get("resolver_was_top"))
+    thresholds = _n_aware_thresholds(len(agent_ids))
+
+    risk_reasons: List[str] = []
+    if trigger_margin < thresholds["weak_margin_threshold"]:
+        risk_reasons.append("weak_pre_resolver_margin")
+    if support_jump >= thresholds["large_jump_threshold"]:
+        risk_reasons.append("large_post_resolver_support_jump")
+    if resolver_answer and r0_majority_answer and resolver_answer != r0_majority_answer:
+        risk_reasons.append("resolver_answer_set_differs_from_r0_majority")
+    if not resolver_was_top:
+        risk_reasons.append("resolver_answer_set_was_not_pre_resolver_top")
+
+    risk_score = len(risk_reasons)
+    safe = (
+        resolver_answer is not None
+        and confirmation.get("confirmed") is True
+        and risk_score <= 1
+    )
+    return {
+        "version": "V3 Multi-Answer Resolver Influence Gate",
+        "safe": safe,
+        "risk_score": risk_score,
+        "risk_reasons": risk_reasons,
+        "resolver_answer": resolver_answer,
+        "trigger_round": trigger_snapshot.get("trigger_round"),
+        "trigger_top_answer": trigger_snapshot.get("trigger_top_answer"),
+        "trigger_margin": trigger_margin,
+        "trigger_support_count": trigger_support_count,
+        "current_round": current_round,
+        "current_support_count": current_support_count,
+        "support_jump": support_jump,
+        "r0_majority_answer": r0_majority_answer,
+        "resolver_was_top": resolver_was_top,
+        "thresholds": thresholds,
+        "answer_mode": "multi_answer_set",
+    }
+
+
 def _format_resolver_influence_block_for_prompt(
     influence_gate: Dict[str, Any],
 ) -> str:
@@ -2963,8 +3589,8 @@ def _all_stable_answer_unchanged_local(verdict_history: List[OptionLedger]) -> b
     """Return whether the latest two ledgers are all-stable with same include."""
     if len(verdict_history) < 2:
         return False
-    current = _included_answer(verdict_history[-1])
-    previous = _included_answer(verdict_history[-2])
+    current = _included_answer_set(verdict_history[-1])
+    previous = _included_answer_set(verdict_history[-2])
     return current is not None and current == previous
 
 
@@ -3155,6 +3781,42 @@ def _included_answer(option_ledger: OptionLedger) -> Optional[str]:
     ]
     if len(included) == 1:
         return included[0]
+    return None
+
+
+def _canonical_answer_string(options: List[str]) -> Optional[str]:
+    """Return A,C style answer set or None."""
+    normalized = sorted({option for option in options if re.fullmatch(r"[A-Z]", option)})
+    return ",".join(normalized) if normalized else None
+
+
+def _included_answer_set(option_ledger: OptionLedger) -> Optional[str]:
+    """Return all included options from an option ledger."""
+    included = [
+        option for option, info in option_ledger.items()
+        if info.get("verdict") == "include"
+    ]
+    return _canonical_answer_string(included)
+
+
+def _get_final_answer_multi(
+    answers: Dict[int, Dict[int, Optional[str]]],
+    current_round: int,
+    option_ledger: OptionLedger,
+    multi_answer: bool,
+) -> Optional[str]:
+    """Return final answer for single-answer or multi-answer mode."""
+    if not multi_answer:
+        return _get_final_answer(answers, current_round, option_ledger)
+    included = _included_answer_set(option_ledger)
+    if included:
+        return included
+    latest = [
+        answer for answer in answers.get(current_round, {}).values()
+        if answer
+    ]
+    if latest:
+        return Counter(latest).most_common(1)[0][0]
     return None
 
 

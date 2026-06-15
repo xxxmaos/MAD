@@ -6,6 +6,34 @@ Compares accuracy, token usage, and debate patterns across modes.
 from typing import Dict, List, Any
 from collections import Counter
 import json
+import re
+
+
+def _answer_set(value: Any) -> set[str]:
+    """Normalize a single answer or comma-separated answer set."""
+    if value is None:
+        return set()
+    return set(re.findall(r"[A-Z]", str(value).upper()))
+
+
+def _answers_equal(predicted: Any, gold: Any) -> bool:
+    """Exact-match comparison that also supports answer sets."""
+    return _answer_set(predicted) == _answer_set(gold)
+
+
+def _answer_set_scores(predicted: Any, gold: Any) -> Dict[str, float]:
+    """Compute option-level precision/recall/F1 for answer sets."""
+    pred = _answer_set(predicted)
+    target = _answer_set(gold)
+    tp = len(pred & target)
+    precision = tp / len(pred) if pred else (1.0 if not target else 0.0)
+    recall = tp / len(target) if target else (1.0 if not pred else 0.0)
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision + recall > 0
+        else 0.0
+    )
+    return {"precision": precision, "recall": recall, "f1": f1}
 
 
 def evaluate_results(results_data: Dict[str, Any], verbose: bool = True) -> Dict[str, Any]:
@@ -41,7 +69,7 @@ def evaluate_results(results_data: Dict[str, Any], verbose: bool = True) -> Dict
     }
     
     # Overall accuracy
-    correct = sum(1 for r in results if r["final_answer"] == r["ground_truth"])
+    correct = sum(1 for r in results if _answers_equal(r["final_answer"], r["ground_truth"]))
     metrics["overall_accuracy"] = correct / len(results) if results else 0.0
     
     if verbose:
@@ -66,13 +94,13 @@ def evaluate_results(results_data: Dict[str, Any], verbose: bool = True) -> Dict
                 agent_answers = [a for a in agent_answers if a is not None]
                 if agent_answers:
                     mv_answer = Counter(agent_answers).most_common(1)[0][0]
-                    if mv_answer == result["ground_truth"]:
+                    if _answers_equal(mv_answer, result["ground_truth"]):
                         round_correct += 1
                     
                     # Check full agreement
                     if len(set(agent_answers)) == 1:
                         full_agreement += 1
-                        if agent_answers[0] != result["ground_truth"]:
+                        if not _answers_equal(agent_answers[0], result["ground_truth"]):
                             full_agreement_wrong += 1
                 
                 # Answer distribution
@@ -270,8 +298,18 @@ def evaluate_mechanism_results(
     }
 
     correct = sum(1 for result in results
-                  if result["final_answer"] == result["ground_truth"])
+                  if _answers_equal(result["final_answer"], result["ground_truth"]))
     metrics["overall_accuracy"] = correct / len(results) if results else 0.0
+    answer_set_scores = [
+        _answer_set_scores(result.get("final_answer"), result.get("ground_truth"))
+        for result in results
+    ]
+    if answer_set_scores:
+        metrics["answer_set_metrics"] = {
+            "precision": sum(item["precision"] for item in answer_set_scores) / len(answer_set_scores),
+            "recall": sum(item["recall"] for item in answer_set_scores) / len(answer_set_scores),
+            "f1": sum(item["f1"] for item in answer_set_scores) / len(answer_set_scores),
+        }
 
     category_stats: Dict[str, Dict[str, int]] = {}
     for result in results:
@@ -279,7 +317,7 @@ def evaluate_mechanism_results(
         if category not in category_stats:
             category_stats[category] = {"correct": 0, "total": 0}
         category_stats[category]["total"] += 1
-        if result["final_answer"] == result["ground_truth"]:
+        if _answers_equal(result["final_answer"], result["ground_truth"]):
             category_stats[category]["correct"] += 1
 
     for category, stats in sorted(category_stats.items()):
@@ -352,7 +390,7 @@ def evaluate_mechanism_results(
 
         if mechanism.get("early_exit", False):
             early_exit_count += 1
-            if result["final_answer"] == result["ground_truth"]:
+            if _answers_equal(result["final_answer"], result["ground_truth"]):
                 early_exit_correct += 1
 
         for log_item in mechanism.get("mechanism_log", []):
@@ -402,6 +440,14 @@ def evaluate_mechanism_results(
     if verbose:
         print(f"\n=== Evaluation Results ({mode.upper()}) ===")
         print(f"Overall Accuracy: {metrics['overall_accuracy']:.2%} ({correct}/{len(results)})")
+        if metrics.get("answer_set_metrics"):
+            answer_set_metrics = metrics["answer_set_metrics"]
+            print(
+                "Answer-set P/R/F1: "
+                f"{answer_set_metrics['precision']:.2%} / "
+                f"{answer_set_metrics['recall']:.2%} / "
+                f"{answer_set_metrics['f1']:.2%}"
+            )
         print("\n  Mechanism Metrics:")
         print(f"    Average actual rounds: {metrics['mechanism_metrics']['average_actual_rounds']:.2f}")
         print(f"    Early exit count: {early_exit_count}/{len(results)}")
