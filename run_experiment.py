@@ -26,7 +26,14 @@ from data_loader import (
     sample_questions,
     format_choices,
 )
-from debate import run_single, run_sc, run_chain_debate
+from debate import (
+    run_single,
+    run_single_multi_answer,
+    run_sc,
+    run_sc_multi_answer,
+    run_chain_debate,
+    run_chain_debate_multi_answer,
+)
 from debate_adaptive_resolver import run_debate_with_adaptive_resolver
 from debate_with_mechanism import run_debate_with_mechanism
 from evaluate import evaluate_results, evaluate_mechanism_results, compare_modes
@@ -88,6 +95,12 @@ def prepare_dataset(dataset_name: str = "mmlu_pro", num_samples: Optional[int] =
 
     if dataset_name == "mmlu_pro":
         dataset = load_mmlu_pro_dataset()
+    elif dataset_name == "mmlu_pro_math":
+        dataset = [
+            item for item in load_mmlu_pro_dataset()
+            if item.get("category", "").lower() == "math"
+        ]
+        print(f"Filtered MMLU-Pro math samples: {len(dataset)}")
     elif dataset_name == "quality":
         dataset = load_quality_dataset(split="validation")
     elif dataset_name == "multirc":
@@ -119,7 +132,14 @@ def run_experiment_mode(
     Returns:
         dict: Experiment results with config, metrics, and per-question results
     """
-    valid_modes = ["single", "sc", "debate"] + MECHANISM_MODES
+    valid_modes = [
+        "single",
+        "single_multi_answer",
+        "sc",
+        "sc_multi_answer",
+        "debate",
+        "debate_multi_answer",
+    ] + MECHANISM_MODES
     if mode not in valid_modes:
         raise ValueError(
             f"Invalid mode: {mode}. Must be one of {valid_modes}"
@@ -127,8 +147,11 @@ def run_experiment_mode(
     
     mode_labels = {
         "single": 0,
+        "single_multi_answer": 17,
         "sc": 1,
+        "sc_multi_answer": 18,
         "debate": 2,
+        "debate_multi_answer": 16,
         "mechanism": 3,
         "no_verdicts_stable": 4,
         "no_verdicts_no_deadlock": 5,
@@ -174,10 +197,20 @@ def run_experiment_mode(
             # Run appropriate debate mode
             if mode == "single":
                 result = run_single(question, choices, verbose=is_verbose)
+            elif mode == "single_multi_answer":
+                result = run_single_multi_answer(question, choices, verbose=is_verbose)
             elif mode == "sc":
                 result = run_sc(question, choices, verbose=is_verbose)
+            elif mode == "sc_multi_answer":
+                result = run_sc_multi_answer(question, choices, verbose=is_verbose)
             elif mode == "debate":
                 result = run_chain_debate(question, choices, verbose=is_verbose)
+            elif mode == "debate_multi_answer":
+                result = run_chain_debate_multi_answer(
+                    question,
+                    choices,
+                    verbose=is_verbose,
+                )
             elif mode in (
                 "adaptive_resolver",
                 "adaptive_resolver_v2_all_stable_gate",
@@ -314,16 +347,40 @@ def run_experiment_mode(
             for cfg in AGENT_CONFIGS
         ],
         "num_agents": NUM_AGENTS,
-        "num_rounds": MAX_DEBATE_ROUNDS if mode in MECHANISM_MODES else (NUM_ROUNDS if mode == "debate" else 1),
-        "topology": "chain" if mode in (["debate"] + MECHANISM_MODES) else "none",
+        "num_rounds": MAX_DEBATE_ROUNDS if mode in MECHANISM_MODES else (NUM_ROUNDS if mode in ("debate", "debate_multi_answer") else 1),
+        "topology": "chain" if mode in (["debate", "debate_multi_answer"] + MECHANISM_MODES) else "none",
         "dataset": dataset_name,
         "num_samples": len(questions),
         "seed": SEED,
         "agent_profile": _config.AGENT_PROFILE,
         "debate_prompt_style": _config.DEBATE_PROMPT_STYLE,
         "temperature": TEMPERATURE,
-        "debate_temp": DEBATE_TEMP if mode in (["debate"] + MECHANISM_MODES) else TEMPERATURE
+        "debate_temp": DEBATE_TEMP if mode in (["debate", "debate_multi_answer"] + MECHANISM_MODES) else TEMPERATURE
     }
+    if mode == "single_multi_answer":
+        config["baseline_variant"] = {
+            "answer_mode": "multi_answer_set",
+            "compression_enabled": False,
+            "early_exit": False,
+            "resolver": False,
+            "final_vote": "single_strongest_agent_answer_set",
+        }
+    if mode == "sc_multi_answer":
+        config["baseline_variant"] = {
+            "answer_mode": "multi_answer_set",
+            "compression_enabled": False,
+            "early_exit": False,
+            "resolver": False,
+            "final_vote": "option_level_majority_include",
+        }
+    if mode == "debate_multi_answer":
+        config["baseline_variant"] = {
+            "answer_mode": "multi_answer_set",
+            "compression_enabled": False,
+            "early_exit": False,
+            "resolver": False,
+            "final_vote": "last_round_answer_set_majority",
+        }
     if mode in MECHANISM_MODES:
         config["mechanism_variant"] = {
             "enable_early_exit": mode != "compression_only_no_early_exit",
@@ -438,7 +495,7 @@ def run_experiment_mode(
     }
     
     # Determine number of rounds for evaluation
-    num_rounds_for_eval = MAX_DEBATE_ROUNDS if mode in MECHANISM_MODES else (NUM_ROUNDS if mode == "debate" else 1)
+    num_rounds_for_eval = MAX_DEBATE_ROUNDS if mode in MECHANISM_MODES else (NUM_ROUNDS if mode in ("debate", "debate_multi_answer") else 1)
     results_data["config"]["num_rounds"] = num_rounds_for_eval
     
     if mode in MECHANISM_MODES:
@@ -453,7 +510,7 @@ def run_experiment_mode(
     }
 
 
-def save_results(results: Dict[str, Any], mode: str) -> str:
+def save_results(results: Dict[str, Any], mode: str, output_dir: str = "results") -> str:
     """
     Save experiment results to JSON file.
     
@@ -464,14 +521,14 @@ def save_results(results: Dict[str, Any], mode: str) -> str:
     Returns:
         str: Path to saved file
     """
-    os.makedirs("results", exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dataset_name = results.get("config", {}).get("dataset", "mmlu_pro")
     num_agents = results.get("config", {}).get("num_agents", NUM_AGENTS)
     prefix = "" if dataset_name == "mmlu_pro" else f"{dataset_name}_"
     filename = (
-        f"results/{prefix}{mode}_{num_agents}agent_"
+        f"{output_dir}/{prefix}{mode}_{num_agents}agent_"
         f"{results['config']['num_samples']}q_{timestamp}.json"
     )
     
@@ -489,7 +546,14 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["single", "sc", "debate"] + MECHANISM_MODES + ["all"],
+        choices=[
+            "single",
+            "single_multi_answer",
+            "sc",
+            "sc_multi_answer",
+            "debate",
+            "debate_multi_answer",
+        ] + MECHANISM_MODES + ["all"],
         default="single",
         help="Experiment mode: single, sc, debate, mechanism variants, or all"
     )
@@ -500,9 +564,9 @@ def main():
     )
     parser.add_argument(
         "--dataset",
-        choices=["mmlu_pro", "quality", "multirc"],
+        choices=["mmlu_pro", "mmlu_pro_math", "quality", "multirc"],
         default="mmlu_pro",
-        help="Dataset to run: mmlu_pro, quality, or multirc"
+        help="Dataset to run: mmlu_pro, mmlu_pro_math, quality, or multirc"
     )
     parser.add_argument(
         "--num-samples",
@@ -521,6 +585,11 @@ def main():
         choices=_config.VALID_DEBATE_PROMPT_STYLES,
         default=_config.DEBATE_PROMPT_STYLE,
         help="Debate prompt style for prompt ablations"
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="results",
+        help="Directory to save result JSON files"
     )
     
     args = parser.parse_args()
@@ -551,7 +620,7 @@ def main():
             verbose=args.verbose,
         )
         all_results[mode] = results
-        save_results(results, mode)
+        save_results(results, mode, args.output_dir)
     
     # Comparison table if all modes run
     if args.mode == "all" and len(all_results) >= 3:

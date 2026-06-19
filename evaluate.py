@@ -71,10 +71,28 @@ def evaluate_results(results_data: Dict[str, Any], verbose: bool = True) -> Dict
     # Overall accuracy
     correct = sum(1 for r in results if _answers_equal(r["final_answer"], r["ground_truth"]))
     metrics["overall_accuracy"] = correct / len(results) if results else 0.0
+    answer_set_scores = [
+        _answer_set_scores(result.get("final_answer"), result.get("ground_truth"))
+        for result in results
+    ]
+    if answer_set_scores:
+        metrics["answer_set_metrics"] = {
+            "precision": sum(item["precision"] for item in answer_set_scores) / len(answer_set_scores),
+            "recall": sum(item["recall"] for item in answer_set_scores) / len(answer_set_scores),
+            "f1": sum(item["f1"] for item in answer_set_scores) / len(answer_set_scores),
+        }
     
     if verbose:
         print(f"\n=== Evaluation Results ({mode.upper()}) ===")
         print(f"Overall Accuracy: {metrics['overall_accuracy']:.2%} ({correct}/{len(results)})")
+        if metrics.get("answer_set_metrics"):
+            answer_set_metrics = metrics["answer_set_metrics"]
+            print(
+                "Answer-set P/R/F1: "
+                f"{answer_set_metrics['precision']:.2%} / "
+                f"{answer_set_metrics['recall']:.2%} / "
+                f"{answer_set_metrics['f1']:.2%}"
+            )
     
     # Per-round metrics (for debate and SC modes)
     for round_num in range(num_rounds + 1):

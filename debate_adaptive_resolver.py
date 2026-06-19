@@ -206,6 +206,7 @@ def run_debate_with_adaptive_resolver(
     current_ledger = compute_verdicts(
         {str(agent_id): answers[0][agent_id] for agent_id in agent_ids},
         num_options=num_options,
+        multi_answer_majority=multi_answer,
     )
     verdict_history.append(current_ledger)
 
@@ -342,6 +343,7 @@ def run_debate_with_adaptive_resolver(
         current_ledger = compute_verdicts(
             {str(agent_id): answers[round_num][agent_id] for agent_id in agent_ids},
             num_options=num_options,
+            multi_answer_majority=multi_answer,
         )
         compression_level = decide_compression_level(
             current_ledger,
@@ -1353,6 +1355,7 @@ Recent agent reasoning:
 
 Task:
 Check whether the consensus answer set is directly supported. If an option should be added or removed, propose the corrected answer set.
+For multi-answer tasks, do not remove currently included options. Only propose additional options if they are strongly supported.
 
 Output strict JSON only:
 {{
@@ -1397,16 +1400,22 @@ def _choose_all_stable_challenge_answer_multi(
     current_answer: Optional[str],
     challenge: Dict[str, Any],
 ) -> Optional[str]:
-    """Choose answer set from a multi-answer all-stable challenge."""
+    """Choose answer set from a multi-answer all-stable challenge.
+
+    MultiRC's dominant error mode is omission, so the challenge is add-only:
+    it may add strongly supported options but cannot remove current includes.
+    """
     alternative = _normalize_answer_set_value(challenge.get("alternative_answer"))
     confidence = str(challenge.get("confidence", "")).strip().lower()
     if (
         alternative
-        and alternative != current_answer
         and confidence == "high"
         and challenge.get("safe") is False
     ):
-        return alternative
+        current_options = set(re.findall(r"[A-J]", str(current_answer or "").upper()))
+        alternative_options = set(re.findall(r"[A-J]", alternative))
+        merged = _canonical_answer_string(sorted(current_options | alternative_options))
+        return merged or current_answer
     return current_answer
 
 

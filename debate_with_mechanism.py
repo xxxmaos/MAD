@@ -52,6 +52,7 @@ def _answer_to_option_set(answer: Optional[str]) -> List[str]:
 def compute_verdicts(
     answers_dict: Dict[str, Optional[str]],
     num_options: Optional[int] = None,
+    multi_answer_majority: bool = False,
 ) -> OptionLedger:
     """
     Compute include/exclude/disputed verdicts for every option.
@@ -59,6 +60,8 @@ def compute_verdicts(
     Args:
         answers_dict: Mapping like {"1": "A", "2": "B"} for a round.
         num_options: Number of option labels to evaluate.
+        multi_answer_majority: For multi-answer tasks, treat each option as an
+            independent binary decision and include options with majority support.
 
     Returns:
         Option ledger keyed by option letter.
@@ -81,12 +84,21 @@ def compute_verdicts(
     ledger: OptionLedger = {}
     for option in option_labels:
         support_count = support_counts[option]
-        if support_count == num_agents:
-            verdict = "include"
-        elif support_count == 0:
-            verdict = "exclude"
+        if multi_answer_majority:
+            include_threshold = (num_agents // 2) + 1
+            if support_count >= include_threshold:
+                verdict = "include"
+            elif support_count <= 1:
+                verdict = "exclude"
+            else:
+                verdict = "disputed"
         else:
-            verdict = "disputed"
+            if support_count == num_agents:
+                verdict = "include"
+            elif support_count == 0:
+                verdict = "exclude"
+            else:
+                verdict = "disputed"
 
         ledger[option] = {
             "verdict": verdict,
