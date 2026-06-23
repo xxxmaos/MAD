@@ -39,6 +39,23 @@ from debate_with_mechanism import run_debate_with_mechanism
 from evaluate import evaluate_results, evaluate_mechanism_results, compare_modes
 
 
+COMPRESSION_ABLATION_POLICIES = {
+    "V3AblationFullLLM": "full_llm",
+    "V3AblationNoCompression": "no_compression",
+    "V3AblationRuleOnlyCompression": "rule_only",
+    "V3AblationEmbeddingCompression": "embedding",
+    "V3AblationHybridCompression": "hybrid",
+}
+
+EARLY_EXIT_ABLATION_POLICIES = {
+    "V3EarlyExitFull": "full",
+    "V3NoEarlyExit": "no_early_exit",
+    "V3AllStableOnly": "all_stable_only",
+    "V3ResolverOnly": "resolver_only",
+    "V3NoSafetyGate": "no_safety_gate",
+    "V3NoResolverInfluenceGate": "no_resolver_influence_gate",
+}
+
 MECHANISM_MODES = [
     "mechanism",
     "no_verdicts_stable",
@@ -52,6 +69,8 @@ MECHANISM_MODES = [
     "V42EmbeddingTopKSnippets",
     "V43SelectiveEmbeddingSnippets",
     "V5SelectiveReplacement",
+    *COMPRESSION_ABLATION_POLICIES.keys(),
+    *EARLY_EXIT_ABLATION_POLICIES.keys(),
     "compression_only_no_early_exit",
 ]
 
@@ -165,6 +184,17 @@ def run_experiment_mode(
         "V43SelectiveEmbeddingSnippets": 13,
         "V5SelectiveReplacement": 14,
         "compression_only_no_early_exit": 15,
+        "V3AblationFullLLM": 19,
+        "V3AblationNoCompression": 20,
+        "V3AblationRuleOnlyCompression": 21,
+        "V3AblationEmbeddingCompression": 22,
+        "V3AblationHybridCompression": 23,
+        "V3EarlyExitFull": 24,
+        "V3NoEarlyExit": 25,
+        "V3AllStableOnly": 26,
+        "V3ResolverOnly": 27,
+        "V3NoSafetyGate": 28,
+        "V3NoResolverInfluenceGate": 29,
     }
     mode_num = mode_labels[mode]
     
@@ -220,6 +250,8 @@ def run_experiment_mode(
                 "V42EmbeddingTopKSnippets",
                 "V43SelectiveEmbeddingSnippets",
                 "V5SelectiveReplacement",
+                *COMPRESSION_ABLATION_POLICIES.keys(),
+                *EARLY_EXIT_ABLATION_POLICIES.keys(),
             ):
                 result = run_debate_with_adaptive_resolver(
                     question,
@@ -235,6 +267,8 @@ def run_experiment_mode(
                             "V42EmbeddingTopKSnippets",
                             "V43SelectiveEmbeddingSnippets",
                             "V5SelectiveReplacement",
+                            *COMPRESSION_ABLATION_POLICIES.keys(),
+                            *EARLY_EXIT_ABLATION_POLICIES.keys(),
                         )
                     ),
                     enable_resolver_influence_gate=(
@@ -245,6 +279,8 @@ def run_experiment_mode(
                             "V42EmbeddingTopKSnippets",
                             "V43SelectiveEmbeddingSnippets",
                             "V5SelectiveReplacement",
+                            *COMPRESSION_ABLATION_POLICIES.keys(),
+                            *EARLY_EXIT_ABLATION_POLICIES.keys(),
                         )
                     ),
                     enable_question_aware_evidence_snippets=(
@@ -273,7 +309,19 @@ def run_experiment_mode(
                         mode == "V5SelectiveReplacement"
                     ),
                     force_llm_summaries=(mode == "V5SelectiveReplacement"),
-                    multi_answer=(mode == "V3MultiAnswerResolverInfluenceGate"),
+                    multi_answer=(
+                        mode == "V3MultiAnswerResolverInfluenceGate"
+                        or (
+                            mode in COMPRESSION_ABLATION_POLICIES
+                            and dataset_name == "multirc"
+                        )
+                        or (
+                            mode in EARLY_EXIT_ABLATION_POLICIES
+                            and dataset_name == "multirc"
+                        )
+                    ),
+                    compression_ablation_policy=COMPRESSION_ABLATION_POLICIES.get(mode),
+                    early_exit_ablation_policy=EARLY_EXIT_ABLATION_POLICIES.get(mode),
                 )
             else:  # mechanism variants
                 mechanism_kwargs = {}
@@ -397,6 +445,8 @@ def run_experiment_mode(
                 "V42EmbeddingTopKSnippets",
                 "V43SelectiveEmbeddingSnippets",
                 "V5SelectiveReplacement",
+                *COMPRESSION_ABLATION_POLICIES.keys(),
+                *EARLY_EXIT_ABLATION_POLICIES.keys(),
             ),
             "enable_deadlock_exit": mode not in (
                 "no_verdicts_no_deadlock",
@@ -409,6 +459,8 @@ def run_experiment_mode(
                 "V42EmbeddingTopKSnippets",
                 "V43SelectiveEmbeddingSnippets",
                 "V5SelectiveReplacement",
+                *COMPRESSION_ABLATION_POLICIES.keys(),
+                *EARLY_EXIT_ABLATION_POLICIES.keys(),
             ),
             "adaptive_resolver": mode in (
                 "adaptive_resolver",
@@ -418,9 +470,17 @@ def run_experiment_mode(
                 "V42EmbeddingTopKSnippets",
                 "V43SelectiveEmbeddingSnippets",
                 "V5SelectiveReplacement",
+                *COMPRESSION_ABLATION_POLICIES.keys(),
+                *EARLY_EXIT_ABLATION_POLICIES.keys(),
             ),
             "adaptive_resolver_variant": (
-                "V5.1 Structured Evidence Snippets"
+                (
+                    f"V3 Compression Ablation - {COMPRESSION_ABLATION_POLICIES[mode]}"
+                    if mode in COMPRESSION_ABLATION_POLICIES
+                    else None
+                )
+                if mode in COMPRESSION_ABLATION_POLICIES
+                else "V5.1 Structured Evidence Snippets"
                 if mode == "V5SelectiveReplacement"
                 else (
                     "V4.3 Selective Embedding Snippets"
@@ -476,7 +536,17 @@ def run_experiment_mode(
             "selective_passage_replacement": mode == "V5SelectiveReplacement",
             "answer_mode": (
                 "multi_answer_set"
-                if mode == "V3MultiAnswerResolverInfluenceGate"
+                if (
+                    mode == "V3MultiAnswerResolverInfluenceGate"
+                    or (
+                        mode in COMPRESSION_ABLATION_POLICIES
+                        and dataset_name == "multirc"
+                    )
+                    or (
+                        mode in EARLY_EXIT_ABLATION_POLICIES
+                        and dataset_name == "multirc"
+                    )
+                )
                 else "single_answer"
             ),
             "evidence_snippet_strategy": (
@@ -485,8 +555,36 @@ def run_experiment_mode(
                 else None
             ),
             "force_llm_summaries": mode == "V5SelectiveReplacement",
-            "compression_enabled": True,
+            "compression_enabled": mode != "V3AblationNoCompression",
+            "ablation_type": (
+                "early_exit"
+                if mode in EARLY_EXIT_ABLATION_POLICIES
+                else "compression"
+                if mode in COMPRESSION_ABLATION_POLICIES
+                else None
+            ),
+            "compression_ablation_policy": COMPRESSION_ABLATION_POLICIES.get(mode),
+            "early_exit_ablation_policy": EARLY_EXIT_ABLATION_POLICIES.get(mode),
+            "compression_policy": (
+                "main_v3"
+                if mode in EARLY_EXIT_ABLATION_POLICIES
+                else None
+            ),
+            "main_v3_unchanged": (
+                True
+                if mode in COMPRESSION_ABLATION_POLICIES
+                or mode in EARLY_EXIT_ABLATION_POLICIES
+                else None
+            ),
         }
+        if mode in EARLY_EXIT_ABLATION_POLICIES:
+            config["mechanism_variant"]["adaptive_resolver_variant"] = (
+                f"V3 Early-Exit Ablation - {EARLY_EXIT_ABLATION_POLICIES[mode]}"
+            )
+            config["mechanism_variant"]["compression_enabled"] = True
+            config["mechanism_variant"]["enable_early_exit"] = (
+                mode != "V3NoEarlyExit"
+            )
     
     # Evaluate results
     results_data = {

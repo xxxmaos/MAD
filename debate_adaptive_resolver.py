@@ -60,6 +60,9 @@ from debate_with_mechanism import (
     _format_recent_votes,
     _get_final_answer,
     _zero_usage,
+    _build_embedding_stable_ledger,
+    _build_rule_reason_ledger,
+    _representative_sentence_reason,
     call_summarizer,
     compute_verdicts,
     decide_compression_level,
@@ -101,6 +104,8 @@ def run_debate_with_adaptive_resolver(
     enable_selective_passage_replacement: bool = False,
     force_llm_summaries: bool = False,
     multi_answer: bool = False,
+    compression_ablation_policy: Optional[str] = None,
+    early_exit_ablation_policy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run debate with adaptive disputed-state handling.
@@ -113,7 +118,11 @@ def run_debate_with_adaptive_resolver(
     if num_options is None:
         num_options = NUM_OPTIONS
 
-    if enable_selective_passage_replacement:
+    if early_exit_ablation_policy:
+        variant_name = f"V3 Early-Exit Ablation - {early_exit_ablation_policy}"
+    elif compression_ablation_policy:
+        variant_name = f"V3 Compression Ablation - {compression_ablation_policy}"
+    elif enable_selective_passage_replacement:
         variant_name = ADAPTIVE_RESOLVER_V5_VARIANT
     elif (
         enable_question_aware_evidence_snippets
@@ -371,8 +380,12 @@ def run_debate_with_adaptive_resolver(
         if (
             round_num >= MIN_DEBATE_ROUNDS
             and _all_stable_answer_unchanged_local(verdict_history)
+            and early_exit_ablation_policy not in ("no_early_exit", "resolver_only")
         ):
-            if not enable_all_stable_safety_gate:
+            if (
+                early_exit_ablation_policy == "no_safety_gate"
+                or not enable_all_stable_safety_gate
+            ):
                 round_log["exit_check"] = "all_stable"
                 mechanism_log.append(round_log)
                 final_answer = _get_final_answer_multi(
@@ -395,7 +408,7 @@ def run_debate_with_adaptive_resolver(
                     summarizer_total_usage,
                     dispute_resolver_total_usage,
                     answer_repair_log=answer_repair_log,
-                    variant="adaptive_resolver_v1",
+                    variant=variant_name,
                 )
 
             # V2 + all_stable safety gate:
@@ -544,10 +557,16 @@ def run_debate_with_adaptive_resolver(
                     active_resolver_analysis,
                     adaptive_stats,
                     resolver_medium_confirmed_once,
-                )
+            )
             round_log["resolver_confirmation"] = confirmation
             if confirmed:
-                if enable_resolver_influence_gate:
+                if early_exit_ablation_policy in ("no_early_exit", "all_stable_only"):
+                    round_log["exit_check"] = "resolver_confirmed_ablation_continue"
+                    confirmed = False
+                elif (
+                    enable_resolver_influence_gate
+                    and early_exit_ablation_policy != "no_resolver_influence_gate"
+                ):
                     if multi_answer:
                         influence_gate = _resolver_influence_gate_multi_answer(
                             active_resolver_analysis,
@@ -622,7 +641,21 @@ def run_debate_with_adaptive_resolver(
         responses_for_summary = {
             str(agent_id): history[round_num][agent_id] for agent_id in agent_ids
         }
-        if force_llm_summaries:
+        if compression_ablation_policy == "no_compression":
+            summary = None
+            round_log["summary_skipped"] = True
+            round_log["compression_ablation_policy"] = compression_ablation_policy
+        elif compression_ablation_policy:
+            summary = _generate_ablation_summary(
+                compression_ablation_policy,
+                compression_level,
+                current_ledger,
+                responses_for_summary,
+                round_num,
+                prev_summary,
+            )
+            round_log["compression_ablation_policy"] = compression_ablation_policy
+        elif force_llm_summaries:
             summary = _generate_llm_summary_v5(
                 compression_level,
                 current_ledger,
@@ -638,7 +671,8 @@ def run_debate_with_adaptive_resolver(
                 round_num,
                 prev_summary,
             )
-        _add_usage(summarizer_total_usage, summary.get("usage", {}))
+        if summary is not None:
+            _add_usage(summarizer_total_usage, summary.get("usage", {}))
         prev_summary = summary
 
         if (
@@ -1599,6 +1633,167 @@ def _latest_calibrated_level(round_log: Dict[str, Any]) -> Optional[str]:
     if isinstance(confirmation, dict) and confirmation.get("calibrated_level"):
         return str(confirmation.get("calibrated_level"))
     return None
+
+
+def _generate_ablation_summary(
+    policy: str,
+    compression_level: str,
+    option_ledger: OptionLedger,
+    responses: Dict[str, str],
+    round_num: int,
+    prev_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Generate summaries for isolated V3 compression ablations."""
+    if policy == "full_llm":
+        return _generate_llm_summary_v5(
+            compression_level,
+            option_ledger,
+            responses,
+            round_num,
+            prev_summary,
+        )
+    if policy == "rule_only":
+        return _build_rule_ablation_summary(
+            compression_level,
+            option_ledger,
+            responses,
+            round_num,
+        )
+    if policy == "embedding":
+        return _build_embedding_ablation_summary(
+            compression_level,
+            option_ledger,
+            responses,
+            round_num,
+        )
+    if policy == "hybrid":
+        return _build_hybrid_ablation_summary(
+            compression_level,
+            option_ledger,
+            responses,
+            round_num,
+            prev_summary,
+        )
+
+    return generate_summary(
+        compression_level,
+        option_ledger,
+        responses,
+        round_num,
+        prev_summary,
+    )
+
+
+def _base_ablation_summary(
+    compression_level: str,
+    option_ledger: OptionLedger,
+    round_num: int,
+    option_ledger_out: Dict[str, Dict[str, Any]],
+    usage: Optional[Usage] = None,
+) -> Dict[str, Any]:
+    included = [
+        option for option, info in option_ledger.items()
+        if info.get("verdict") == "include"
+    ]
+    return {
+        "round": round_num,
+        "compression_level": compression_level,
+        "option_ledger": option_ledger_out,
+        "frozen_options": [
+            option for option, info in option_ledger.items()
+            if info.get("verdict") != "disputed"
+        ],
+        "disputed_options": [
+            option for option, info in option_ledger.items()
+            if info.get("verdict") == "disputed"
+        ],
+        "current_answer": included,
+        "final_answer": included,
+        "delta_from_last_round": {"stance_changes": [], "new_reasons": 0},
+        "usage": usage or _zero_usage(),
+        "option_ledger_raw": option_ledger,
+    }
+
+
+def _build_rule_ablation_summary(
+    compression_level: str,
+    option_ledger: OptionLedger,
+    responses: Dict[str, str],
+    round_num: int,
+) -> Dict[str, Any]:
+    if compression_level == "none":
+        return generate_summary(compression_level, option_ledger, responses, round_num)
+    return _base_ablation_summary(
+        compression_level,
+        option_ledger,
+        round_num,
+        _build_rule_reason_ledger(option_ledger),
+    )
+
+
+def _build_embedding_ablation_summary(
+    compression_level: str,
+    option_ledger: OptionLedger,
+    responses: Dict[str, str],
+    round_num: int,
+) -> Dict[str, Any]:
+    if compression_level == "none":
+        return generate_summary(compression_level, option_ledger, responses, round_num)
+
+    ledger_out: Dict[str, Dict[str, Any]] = {}
+    ledger_out.update(_build_embedding_stable_ledger(option_ledger, responses))
+    for option, info in sorted(option_ledger.items()):
+        if info.get("verdict") != "disputed":
+            continue
+        ledger_out[option] = {
+            "verdict": "disputed",
+            "support": {
+                "count": info.get("support_count", 0),
+                "agents": info.get("support_agents", []),
+                "top_reason": _representative_sentence_reason(option, "support", responses),
+            },
+            "oppose": {
+                "count": info.get("oppose_count", 0),
+                "agents": info.get("oppose_agents", []),
+                "top_reason": _representative_sentence_reason(option, "oppose", responses),
+            },
+        }
+    return _base_ablation_summary(
+        compression_level,
+        option_ledger,
+        round_num,
+        ledger_out,
+    )
+
+
+def _build_hybrid_ablation_summary(
+    compression_level: str,
+    option_ledger: OptionLedger,
+    responses: Dict[str, str],
+    round_num: int,
+    prev_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if compression_level in ("none", "full"):
+        return generate_summary(
+            compression_level,
+            option_ledger,
+            responses,
+            round_num,
+            prev_summary,
+        )
+
+    llm_summary = _generate_llm_summary_v5(
+        compression_level,
+        option_ledger,
+        responses,
+        round_num,
+        prev_summary,
+    )
+    ledger_out = dict(llm_summary.get("option_ledger", {}))
+    ledger_out.update(_build_embedding_stable_ledger(option_ledger, responses))
+    llm_summary["option_ledger"] = ledger_out
+    llm_summary["option_ledger_raw"] = option_ledger
+    return llm_summary
 
 
 def _generate_llm_summary_v5(
