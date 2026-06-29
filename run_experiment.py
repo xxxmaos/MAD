@@ -37,6 +37,7 @@ from debate import (
 from debate_adaptive_resolver import run_debate_with_adaptive_resolver
 from debate_with_mechanism import run_debate_with_mechanism
 from evaluate import evaluate_results, evaluate_mechanism_results, compare_modes
+from ollama_gpu_manager import configure_ollama_for_agents
 
 
 COMPRESSION_ABLATION_POLICIES = {
@@ -403,7 +404,8 @@ def run_experiment_mode(
         "agent_profile": _config.AGENT_PROFILE,
         "debate_prompt_style": _config.DEBATE_PROMPT_STYLE,
         "temperature": TEMPERATURE,
-        "debate_temp": DEBATE_TEMP if mode in (["debate", "debate_multi_answer"] + MECHANISM_MODES) else TEMPERATURE
+        "debate_temp": DEBATE_TEMP if mode in (["debate", "debate_multi_answer"] + MECHANISM_MODES) else TEMPERATURE,
+        "ollama_gpu_assignment": _config.OLLAMA_GPU_ASSIGNMENT,
     }
     if mode == "single_multi_answer":
         config["baseline_variant"] = {
@@ -689,9 +691,18 @@ def main():
         default="results",
         help="Directory to save result JSON files"
     )
+    parser.add_argument(
+        "--no-auto-gpu",
+        action="store_true",
+        help="Disable automatic Ollama GPU routing"
+    )
     
     args = parser.parse_args()
     apply_experiment_settings(args.agent_profile, args.prompt_style)
+    configure_ollama_for_agents(
+        _config.AGENT_CONFIGS,
+        enabled=not args.no_auto_gpu,
+    )
     
     # Prepare dataset once
     print("\n" + "="*70)

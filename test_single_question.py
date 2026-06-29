@@ -10,6 +10,7 @@ from tqdm import tqdm
 from config import NUM_ROUNDS, TEMPERATURE, DEBATE_TEMP, SLEEP_BETWEEN_AGENTS, AGENT_CONFIGS
 from data_loader import load_mmlu_pro_dataset, format_choices
 from agent import agent_initial_response, agent_debate_response, extract_answer
+from ollama_gpu_manager import configure_ollama_for_agents
 
 
 def get_agent_name(agent_id: int) -> str:
@@ -28,6 +29,8 @@ def test_single_question():
     - Round 1: Chain debate (1 <- 3 <- 2 <- 1)
     - Majority vote result
     """
+    configure_ollama_for_agents(AGENT_CONFIGS)
+
     print("\n" + "="*70)
     print("TEST: Single Question with All Models")
     print("="*70 + "\n")

@@ -150,6 +150,40 @@ RETRY_DELAY = 5  # Seconds between retries (Ollama models load slowly)
 OLLAMA_REQUEST_TIMEOUT = 120  # Seconds (local models are slower than API)
 
 # ============================================================================
+# OLLAMA GPU CONFIGURATION
+# ============================================================================
+# The experiment runners can automatically pick up to four available RTX 4090 D
+# cards, start one Ollama server per GPU, and route agents across those servers.
+OLLAMA_AUTO_GPU_ENABLED = True
+OLLAMA_MIN_GPU_COUNT = 1
+OLLAMA_MAX_GPU_COUNT = 4
+OLLAMA_GPU_NAME_FILTER = "4090 D"
+OLLAMA_MIN_FREE_MEMORY_MB = 12000
+OLLAMA_IDLE_UTILIZATION = 10
+OLLAMA_HOST = "127.0.0.1"
+OLLAMA_BASE_PORT = 11440
+OLLAMA_LOG_DIR = "ablation_result/ollama_logs"
+OLLAMA_NUM_PARALLEL = 1
+OLLAMA_MAX_LOADED_MODELS = 1
+OLLAMA_KEEP_ALIVE = "-1"
+OLLAMA_GPU_ASSIGNMENT = None
+
+# Approximate resident VRAM footprints. These are used only for balancing
+# models across the two selected GPUs; Ollama still owns the actual loading.
+MODEL_MEMORY_ESTIMATES_GB = {
+    "qwen2.5:7b": 4.7,
+    "llama3.1:8b": 4.9,
+    "mistral:7b": 4.4,
+    "qwen3:8b": 5.2,
+    "deepseek-r1:14b": 9.0,
+    "phi4:14b": 9.1,
+    "gemma4:e4b-it-q4_k_m": 3.0,
+    "glm4:9b": 6.0,
+    "command-r7b:7b": 4.5,
+    "nomic-embed-text": 0.3,
+}
+
+# ============================================================================
 # SLEEP CONFIGURATION FOR OLLAMA MODEL SWITCHING
 # ============================================================================
 SLEEP_BETWEEN_QUESTIONS = 1  # Seconds, give Ollama time to switch models

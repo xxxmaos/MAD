@@ -8,7 +8,9 @@ import re
 import time
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
+import httpx
 from openai import OpenAI
 
 import config as _config
@@ -35,12 +37,21 @@ def get_client(agent_id: int) -> Tuple[OpenAI, str, str]:
         )
 
     cfg = AGENT_CONFIGS[agent_id - 1]
-    client = OpenAI(
+    client_kwargs: Dict[str, Any] = dict(
         api_key=cfg["api_key"],
         base_url=cfg["base_url"],
         timeout=OLLAMA_REQUEST_TIMEOUT,
     )
+    if _is_local_base_url(cfg["base_url"]):
+        client_kwargs["http_client"] = httpx.Client(trust_env=False)
+    client = OpenAI(**client_kwargs)
     return client, cfg["model"], cfg["name"]
+
+
+def _is_local_base_url(base_url: str) -> bool:
+    """Return true for local Ollama endpoints that must bypass proxies."""
+    host = urlparse(base_url).hostname
+    return host in {"127.0.0.1", "localhost", "::1"}
 
 
 def extract_usage(response: Any) -> Usage:

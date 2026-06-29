@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
+import config as _config
 from config import (
     AGENT_CONFIGS,
     CONSECUTIVE_STABLE_NEEDED,
@@ -40,9 +41,23 @@ from data_loader import (
 )
 from debate_with_mechanism import run_debate_with_mechanism
 from evaluate_mechanism import evaluate_mechanism_results, print_compare_table
+from ollama_gpu_manager import configure_ollama_for_agents
 
 DEFAULT_MECHANISM_SAMPLES = 300
 DEFAULT_ABLATION_SAMPLES = 50
+RESULT_DIR = "ablation_result"
+
+
+def apply_agent_profile(agent_profile: str) -> None:
+    """Apply an agent profile while preserving imported AGENT_CONFIGS refs."""
+    if agent_profile not in _config.AGENT_PROFILES:
+        raise ValueError(f"Unknown agent profile: {agent_profile}")
+    selected_agents = [
+        cfg.copy() for cfg in _config.AGENT_PROFILES[agent_profile]
+    ]
+    _config.AGENT_CONFIGS[:] = selected_agents
+    _config.AGENT_PROFILE = agent_profile
+    _config.NUM_AGENTS = len(selected_agents)
 
 
 def prepare_dataset(num_samples: int = DEFAULT_MECHANISM_SAMPLES) -> List[Dict[str, Any]]:
@@ -276,7 +291,7 @@ def run_ablation_mode(
 
 def save_results(results: Dict[str, Any]) -> str:
     """
-    Save mechanism results under results/.
+    Save mechanism results under ablation_result/.
 
     Args:
         results: Complete experiment result dict.
@@ -284,11 +299,11 @@ def save_results(results: Dict[str, Any]) -> str:
     Returns:
         Saved file path.
     """
-    os.makedirs("results", exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     num_samples = results["config"]["num_samples"]
     mode = results["config"].get("mode", "mechanism")
-    filename = f"results/{mode}_{num_samples}q_{timestamp}.json"
+    filename = f"{RESULT_DIR}/{mode}_{num_samples}q_{timestamp}.json"
     with open(filename, "w", encoding="utf-8") as file:
         json.dump(results, file, indent=2, ensure_ascii=False)
     print(f"\nResults saved to: {filename}")
@@ -297,7 +312,7 @@ def save_results(results: Dict[str, Any]) -> str:
 
 def save_ablation_results(results: Dict[str, Any]) -> str:
     """
-    Save aggregate ablation results under results/.
+    Save aggregate ablation results under ablation_result/.
 
     Args:
         results: Aggregate ablation result dict.
@@ -305,10 +320,10 @@ def save_ablation_results(results: Dict[str, Any]) -> str:
     Returns:
         Saved file path.
     """
-    os.makedirs("results", exist_ok=True)
+    os.makedirs(RESULT_DIR, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     num_samples = results["config"]["num_samples"]
-    filename = f"results/ablation_{num_samples}q_{timestamp}.json"
+    filename = f"{RESULT_DIR}/ablation_{num_samples}q_{timestamp}.json"
     with open(filename, "w", encoding="utf-8") as file:
         json.dump(results, file, indent=2, ensure_ascii=False)
     print(f"\nAblation results saved to: {filename}")
@@ -350,7 +365,14 @@ def _build_config(
     return {
         "mode": mode,
         "agents": [
-            {"id": cfg["agent_id"], "model": cfg["model"], "name": cfg["name"]}
+            {
+                "id": cfg["agent_id"],
+                "model": cfg["model"],
+                "name": cfg["name"],
+                "base_url": cfg.get("base_url"),
+                "gpu_index": cfg.get("gpu_index"),
+                "ollama_port": cfg.get("ollama_port"),
+            }
             for cfg in AGENT_CONFIGS
         ],
         "num_agents": len(AGENT_CONFIGS),
@@ -358,8 +380,10 @@ def _build_config(
         "topology": "chain",
         "num_samples": num_samples,
         "seed": SEED,
+        "agent_profile": _config.AGENT_PROFILE,
         "temperature": TEMPERATURE,
         "debate_temp": DEBATE_TEMP,
+        "ollama_gpu_assignment": _config.OLLAMA_GPU_ASSIGNMENT,
         "mechanism_config": {
             "disputed_partial_max": DISPUTED_PARTIAL_MAX,
             "early_exit_r0": EARLY_EXIT_R0,
@@ -380,7 +404,7 @@ def _build_config(
 
 def _load_latest_result(mode: str, required: bool = False) -> Optional[Dict[str, Any]]:
     """
-    Load the newest result JSON for a mode from results/.
+    Load the newest result JSON for a mode from ablation_result/.
 
     Args:
         mode: Filename prefix, e.g. "single" or "mechanism".
@@ -389,7 +413,7 @@ def _load_latest_result(mode: str, required: bool = False) -> Optional[Dict[str,
     Returns:
         Parsed JSON dict, or None when optional and missing.
     """
-    result_dir = Path("results")
+    result_dir = Path(RESULT_DIR)
     files = sorted(
         result_dir.glob(f"{mode}_*q_*.json"),
         key=lambda path: path.stat().st_mtime,
@@ -397,7 +421,9 @@ def _load_latest_result(mode: str, required: bool = False) -> Optional[Dict[str,
     )
     if not files:
         if required:
-            raise FileNotFoundError(f"No results/{mode}_*q_*.json file found.")
+            raise FileNotFoundError(
+                f"No {RESULT_DIR}/{mode}_*q_*.json file found."
+            )
         return None
 
     latest = files[0]
@@ -424,15 +450,32 @@ def main() -> None:
         help="Number of MMLU-Pro questions to sample.",
     )
     parser.add_argument(
+        "--agent-profile",
+        choices=list(_config.AGENT_PROFILES.keys()),
+        default=_config.AGENT_PROFILE,
+        help="Agent model profile.",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print detailed output for every question.",
+    )
+    parser.add_argument(
+        "--no-auto-gpu",
+        action="store_true",
+        help="Disable automatic two-GPU Ollama routing.",
     )
     args = parser.parse_args()
 
     if args.mode == "compare":
         compare_latest_results()
         return
+
+    apply_agent_profile(args.agent_profile)
+    configure_ollama_for_agents(
+        _config.AGENT_CONFIGS,
+        enabled=not args.no_auto_gpu,
+    )
 
     print("\n" + "=" * 70)
     print("LOADING MMLU-PRO DATASET")

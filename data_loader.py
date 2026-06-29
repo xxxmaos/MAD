@@ -71,7 +71,7 @@ def load_multirc_dataset(split: str = "validation") -> List[Dict[str, Any]]:
     canonical answer set such as "A,C".
     """
     print(f"Loading SuperGLUE MultiRC dataset from HuggingFace (split={split})...")
-    dataset = load_dataset("super_glue", "multirc", split=split)
+    dataset = load_dataset("aps/super_glue", "multirc", split=split)
     print(f"Dataset loaded. Total answer candidates: {len(dataset)}")
 
     grouped: Dict[Any, Dict[str, Any]] = {}
@@ -154,6 +154,7 @@ def sample_questions(
         list: Sampled questions with metadata
     """
     random.seed(seed)
+    target_samples = min(num_samples, len(dataset))
     
     # Group by category
     category_groups: Dict[str, List[Dict[str, Any]]] = {}
@@ -193,11 +194,15 @@ def sample_questions(
             sampled.append(selected['item'])
     
     # Fill remaining slots randomly
-    remaining = num_samples - len(sampled)
+    selected_item_ids = {id(item) for item in sampled}
+    remaining = target_samples - len(sampled)
     if remaining > 0:
         all_items = []
         for items in category_groups.values():
-            all_items.extend(items)
+            all_items.extend(
+                item for item in items
+                if id(item["item"]) not in selected_item_ids
+            )
         additional = random.sample(all_items, min(remaining, len(all_items)))
         sampled.extend([x['item'] for x in additional])
     
@@ -205,7 +210,7 @@ def sample_questions(
     random.shuffle(sampled)
     
     # Ensure no duplicates by checking indices
-    sampled = sampled[:num_samples]
+    sampled = sampled[:target_samples]
     
     print(f"Sampled {len(sampled)} questions")
     category_counts = {}
